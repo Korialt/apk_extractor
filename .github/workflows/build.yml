@@ -110,11 +110,16 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Create GitHub release
+      - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          find release-artifacts -maxdepth 2 -type f -print
-          gh release create "${GITHUB_REF_NAME}" $(find release-artifacts -maxdepth 2 -type f) --title "${GITHUB_REF_NAME}" --notes "自动构建版本 ${GITHUB_REF_NAME}" --verify-tag
+          files=$(find release-artifacts -maxdepth 2 -type f -print)
+          printf '%s\n' "$files"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" $files --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" $files --title "${GITHUB_REF_NAME}" --notes "自动构建版本 ${GITHUB_REF_NAME}" --verify-tag
+          fi
 

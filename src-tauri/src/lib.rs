@@ -60,6 +60,14 @@ struct ScanSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ExportStarted {
+    device_serial: String,
+    package_name: String,
+    bundle_format: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ExportResult {
     output_file: String,
     package_dir: String,
@@ -94,6 +102,22 @@ enum BundleFormat {
     Xapk,
 }
 
+impl BundleFormat {
+    fn extension(&self) -> &'static str {
+        match self {
+            BundleFormat::Apks => "apks",
+            BundleFormat::Xapk => "xapk",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            BundleFormat::Apks => "APKS",
+            BundleFormat::Xapk => "XAPK",
+        }
+    }
+}
+
 #[tauri::command]
 fn list_devices() -> Result<Vec<Device>, String> {
     let output = run_command("adb", &["devices"])?;
@@ -118,12 +142,13 @@ fn preview_paths(device_serial: String, package_name: String) -> Result<Vec<Stri
 }
 
 #[tauri::command]
-fn export_package(
+fn start_export(
+    app_handle: AppHandle,
     device_serial: String,
     package_name: String,
     output_dir: String,
     bundle_format: BundleFormat,
-) -> Result<ExportResult, String> {
+) -> Result<(), String> {
     if package_name.trim().is_empty() {
         return Err("请先选择需要提取的包名。".to_string());
     }
@@ -132,25 +157,79 @@ fn export_package(
     }
 
     let device = selected_device(device_serial)?;
-    let remote_paths = get_apk_paths(&device, &package_name)?;
+    std::thread::spawn(move || {
+        emit_event(
+            &app_handle,
+            "export-started",
+            &ExportStarted {
+                device_serial: device.serial.clone(),
+                package_name: package_name.clone(),
+                bundle_format: bundle_format.label().to_string(),
+            },
+        );
+
+        match export_package_files(
+            &app_handle,
+            &device,
+            &package_name,
+            &output_dir,
+            bundle_format,
+        ) {
+            Ok(result) => emit_event(&app_handle, "export-finished", &result),
+            Err(err) => emit_event(&app_handle, "export-error", &err),
+        }
+    });
+
+    Ok(())
+}
+
+fn export_package_files(
+    app_handle: &AppHandle,
+    device: &Device,
+    package_name: &str,
+    output_dir: &str,
+    bundle_format: BundleFormat,
+) -> Result<ExportResult, String> {
+    let remote_paths = get_apk_paths(device, package_name)?;
     let timestamp = unix_timestamp_seconds()?;
     let package_dir =
-        PathBuf::from(output_dir).join(format!("{}_{}", safe_component(&package_name), timestamp));
+        PathBuf::from(output_dir).join(format!("{}_{}", safe_component(package_name), timestamp));
+
+    if remote_paths.len() == 1 {
+        fs::create_dir_all(&package_dir).map_err(|err| format!("创建输出目录失败：{}", err))?;
+        let output_file = package_dir.join(format!("{}.apk", package_name));
+        emit_export_log(
+            app_handle,
+            "检测到单 APK 应用，直接导出 APK 文件。".to_string(),
+        );
+        emit_export_log(app_handle, format!("提取设备文件：{}", remote_paths[0]));
+        pull_remote_file(device, &remote_paths[0], &output_file)?;
+
+        let output_file_text = output_file.to_string_lossy().into_owned();
+        return Ok(ExportResult {
+            output_file: output_file_text.clone(),
+            package_dir: package_dir.to_string_lossy().into_owned(),
+            pulled_files: vec![output_file_text],
+            remote_paths,
+            note: Some("检测到单 APK 应用，已直接导出 .apk，未额外打包为 APKS/XAPK。".to_string()),
+        });
+    }
+
     let apk_dir = package_dir.join("apk");
     fs::create_dir_all(&apk_dir).map_err(|err| format!("创建输出目录失败：{}", err))?;
 
-    let pulled_files = pull_apks(&device, &remote_paths, &apk_dir)?;
-    let extension = match bundle_format {
-        BundleFormat::Apks => "apks",
-        BundleFormat::Xapk => "xapk",
-    };
-    let output_file = package_dir.join(format!("{}.{}", package_name, extension));
+    let pulled_files = pull_apks(app_handle, device, &remote_paths, &apk_dir)?;
+    let output_file = package_dir.join(format!("{}.{}", package_name, bundle_format.extension()));
 
     let mut note = None;
+    emit_export_log(
+        app_handle,
+        format!("正在生成 {} 文件...", bundle_format.label()),
+    );
     match bundle_format {
         BundleFormat::Apks => create_apks(&pulled_files, &output_file)?,
         BundleFormat::Xapk => {
-            let package_info = get_package_info(&device, &package_name)?;
+            let package_info = get_package_info(device, package_name)?;
             let base_apk = find_base_apk(&pulled_files)?;
             let aapt_info = match get_aapt_info(base_apk) {
                 Ok(info) => info,
@@ -362,6 +441,7 @@ fn get_apk_paths(device: &Device, package_name: &str) -> Result<Vec<String>, Str
 }
 
 fn pull_apks(
+    app_handle: &AppHandle,
     device: &Device,
     remote_paths: &[String],
     output_dir: &Path,
@@ -375,6 +455,7 @@ fn pull_apks(
         }
         used_names.push(file_name.clone());
         let local_path = output_dir.join(file_name);
+        emit_export_log(app_handle, format!("提取设备文件：{}", remote_path));
         pull_remote_file(device, remote_path, &local_path)?;
         local_paths.push(local_path);
     }
@@ -856,6 +937,10 @@ fn emit_log(app_handle: &AppHandle, message: String) {
     let _ = app_handle.emit("scan-log", message);
 }
 
+fn emit_export_log(app_handle: &AppHandle, message: String) {
+    let _ = app_handle.emit("export-log", message);
+}
+
 fn emit_event<T: Serialize + Clone>(app_handle: &AppHandle, event: &str, payload: &T) {
     let _ = app_handle.emit(event, payload.clone());
 }
@@ -867,7 +952,7 @@ pub fn run() {
             list_devices,
             start_scan,
             preview_paths,
-            export_package
+            start_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -28,6 +28,12 @@ export interface ScanSummary {
   iconCount: number;
 }
 
+export interface ExportStarted {
+  deviceSerial: string;
+  packageName: string;
+  bundleFormat: string;
+}
+
 export interface ExportResult {
   outputFile: string;
   packageDir: string;

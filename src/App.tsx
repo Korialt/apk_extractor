@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
-import type { AppEntry, BundleFormat, Device, ExportResult, ScanItem, ScanStarted, ScanSummary, Theme } from "./types";
+import type { AppEntry, BundleFormat, Device, ExportResult, ExportStarted, ScanItem, ScanStarted, ScanSummary, Theme } from "./types";
 
 function appName(app: AppEntry): string {
   return app.label?.trim() || app.packageName;
@@ -98,6 +98,7 @@ export default function App() {
   const [format, setFormat] = useState<BundleFormat>("apks");
   const [busy, setBusy] = useState(false);
   const [scanRunning, setScanRunning] = useState(false);
+  const [exportRunning, setExportRunning] = useState(false);
   const [phase, setPhase] = useState("就绪");
   const [devices, setDevices] = useState<Device[]>([]);
   const [devicePickerOpen, setDevicePickerOpen] = useState(false);
@@ -112,7 +113,9 @@ export default function App() {
   const selectedApp = selectedPackage ? apps.find((app) => app.packageName === selectedPackage) ?? null : null;
   const filteredApps = useMemo(() => apps.filter((app) => matchesQuery(app, query)), [apps, query]);
   const scanPercent = scanTotal > 0 ? Math.round((scanIndex / scanTotal) * 100) : null;
-  const actionBusy = busy || scanRunning;
+  const singleApkSelected = selectedApp !== null && previewPaths.length === 1;
+  const selectedOutputLabel = singleApkSelected ? "APK" : format.toUpperCase();
+  const actionBusy = busy || scanRunning || exportRunning;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -152,6 +155,27 @@ export default function App() {
         appendLog(`扫描完成：${event.payload.total} 个应用，读取到 ${event.payload.iconCount} 个图标。`);
         setPhase(`扫描完成：${event.payload.total} 个应用`);
       }),
+      listen<ExportStarted>("export-started", (event) => {
+        setExportRunning(true);
+        setPhase(`正在后台导出 ${event.payload.packageName}`);
+        appendLog(`开始导出 ${event.payload.packageName}，设备：${event.payload.deviceSerial}。`);
+      }),
+      listen<string>("export-log", (event) => appendLog(event.payload)),
+      listen<ExportResult>("export-finished", (event) => {
+        setExportRunning(false);
+        setExportResult(event.payload);
+        setPreviewPaths(event.payload.remotePaths);
+        event.payload.remotePaths.forEach((path) => appendLog(`设备路径：${path}`));
+        event.payload.pulledFiles.forEach((path) => appendLog(`本地文件：${path}`));
+        if (event.payload.note) appendLog(event.payload.note);
+        appendLog(`导出完成：${event.payload.outputFile}`);
+        setPhase("导出完成");
+      }),
+      listen<string>("export-error", (event) => {
+        setExportRunning(false);
+        appendLog(event.payload);
+        setPhase("导出失败，详情见日志");
+      }),
     ];
 
     return () => {
@@ -164,7 +188,7 @@ export default function App() {
   }
 
   async function scanApps() {
-    if (scanRunning) return;
+    if (scanRunning || exportRunning) return;
 
     setBusy(true);
     setPhase("检测设备");
@@ -266,6 +290,7 @@ export default function App() {
   }
 
   async function exportSelected() {
+    if (exportRunning) return;
     if (!selectedApp) {
       appendLog("请先选择需要提取的应用。将不会弹出窗口。 ");
       setPhase("请先选择应用");
@@ -278,27 +303,22 @@ export default function App() {
     }
 
     setBusy(true);
-    setPhase("提取并打包");
+    setExportRunning(true);
+    setPhase("启动后台导出");
     setExportResult(null);
-    appendLog(`开始提取 ${selectedApp.packageName}，目标格式：${format.toUpperCase()}。`);
+    appendLog(`开始导出 ${selectedApp.packageName}，目标格式：${selectedOutputLabel}。`);
     try {
-      const result = await invoke<ExportResult>("export_package", {
+      await invoke<void>("start_export", {
         deviceSerial,
         packageName: selectedApp.packageName,
         outputDir,
         bundleFormat: format,
       });
-      setExportResult(result);
-      setPreviewPaths(result.remotePaths);
-      result.remotePaths.forEach((path) => appendLog(`设备路径：${path}`));
-      result.pulledFiles.forEach((path) => appendLog(`本地文件：${path}`));
-      if (result.note) appendLog(result.note);
-      appendLog(`打包完成：${result.outputFile}`);
-      setPhase("打包完成");
     } catch (error) {
       const message = safeLogMessage(error);
       appendLog(message);
-      setPhase("打包失败，详情见日志");
+      setExportRunning(false);
+      setPhase("导出启动失败，详情见日志");
     } finally {
       setBusy(false);
     }
@@ -350,8 +370,8 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <div className="panel-title">打包设置</div>
-          <FormatSwitch value={format} onChange={setFormat} disabled={actionBusy} />
+          <div className="panel-title">导出设置</div>
+          <FormatSwitch value={format} onChange={setFormat} disabled={actionBusy || singleApkSelected} />
           <label className="field-block">
             输出目录
             <div className="inline-field">
@@ -362,7 +382,7 @@ export default function App() {
             </div>
           </label>
           <button type="button" className="primary" disabled={actionBusy} onClick={() => void exportSelected()}>
-            提取并打包
+            导出应用
           </button>
         </section>
       </aside>
@@ -395,7 +415,7 @@ export default function App() {
             <section className="detail-section">
               <div className="section-header compact">
                 <h3>选择详情</h3>
-                {selectedApp ? <span>{format.toUpperCase()}</span> : null}
+                {selectedApp ? <span>{selectedOutputLabel}</span> : null}
               </div>
               {selectedApp ? (
                 <div className="selected-app">
@@ -411,7 +431,7 @@ export default function App() {
             </section>
 
             <PathList title="设备 APK 路径" paths={previewPaths} />
-            <PathList title="本地提取文件" paths={exportResult?.pulledFiles ?? []} />
+            <PathList title="本地导出文件" paths={exportResult?.pulledFiles ?? []} />
 
             <section className="detail-section">
               <div className="section-header compact">

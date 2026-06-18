@@ -95,56 +95,35 @@ enum BundleFormat {
 }
 
 #[tauri::command]
-fn scan_apps(app_handle: AppHandle) -> Result<ScanSummary, String> {
-    let device = require_single_device()?;
-    let apps = list_installed_apps(&device)?;
-    let total = apps.len();
-    emit_event(
-        &app_handle,
-        "scan-started",
-        &ScanStarted {
-            device_serial: device.serial.clone(),
-            total,
-        },
-    );
-
-    let cache_root = icon_cache_root(&device.serial)?;
-    let mut icon_count = 0;
-    for (index, app) in apps.iter().enumerate() {
-        let presentation = inspect_app_presentation(&device, app, &cache_root, &app_handle);
-        if presentation.icon_data_url.is_some() {
-            icon_count += 1;
-        }
-
-        emit_event(
-            &app_handle,
-            "scan-item",
-            &ScanItem {
-                index: index + 1,
-                total,
-                app: AppEntry {
-                    package_name: app.package_name.clone(),
-                    base_apk_path: app.base_apk_path.clone(),
-                    label: presentation.label,
-                    icon_data_url: presentation.icon_data_url,
-                },
-            },
-        );
-    }
-
-    let summary = ScanSummary { total, icon_count };
-    emit_event(&app_handle, "scan-finished", &summary);
-    Ok(summary)
+fn list_devices() -> Result<Vec<Device>, String> {
+    let output = run_command("adb", &["devices"])?;
+    Ok(parse_adb_devices(&output))
 }
 
 #[tauri::command]
-fn preview_paths(package_name: String) -> Result<Vec<String>, String> {
-    let device = require_single_device()?;
+fn start_scan(app_handle: AppHandle, device_serial: String) -> Result<(), String> {
+    let device = selected_device(device_serial)?;
+    std::thread::spawn(move || {
+        if let Err(err) = scan_device_apps(&app_handle, &device) {
+            emit_event(&app_handle, "scan-error", &err);
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn preview_paths(device_serial: String, package_name: String) -> Result<Vec<String>, String> {
+    let device = selected_device(device_serial)?;
     get_apk_paths(&device, &package_name)
 }
 
 #[tauri::command]
-fn export_package(package_name: String, output_dir: String, bundle_format: BundleFormat) -> Result<ExportResult, String> {
+fn export_package(
+    device_serial: String,
+    package_name: String,
+    output_dir: String,
+    bundle_format: BundleFormat,
+) -> Result<ExportResult, String> {
     if package_name.trim().is_empty() {
         return Err("请先选择需要提取的包名。".to_string());
     }
@@ -152,10 +131,11 @@ fn export_package(package_name: String, output_dir: String, bundle_format: Bundl
         return Err("请选择输出目录。".to_string());
     }
 
-    let device = require_single_device()?;
+    let device = selected_device(device_serial)?;
     let remote_paths = get_apk_paths(&device, &package_name)?;
     let timestamp = unix_timestamp_seconds()?;
-    let package_dir = PathBuf::from(output_dir).join(format!("{}_{}", safe_component(&package_name), timestamp));
+    let package_dir =
+        PathBuf::from(output_dir).join(format!("{}_{}", safe_component(&package_name), timestamp));
     let apk_dir = package_dir.join("apk");
     fs::create_dir_all(&apk_dir).map_err(|err| format!("创建输出目录失败：{}", err))?;
 
@@ -175,24 +155,76 @@ fn export_package(package_name: String, output_dir: String, bundle_format: Bundl
             let aapt_info = match get_aapt_info(base_apk) {
                 Ok(info) => info,
                 Err(err) => {
-                    note = Some(format!("aapt 读取失败，已改用 dumpsys package 生成 XAPK manifest：{}", err));
+                    note = Some(format!(
+                        "aapt 读取失败，已改用 dumpsys package 生成 XAPK manifest：{}",
+                        err
+                    ));
                     None
                 }
             };
             if aapt_info.is_none() && note.is_none() {
                 note = Some("未检测到本机 aapt，XAPK manifest 的应用名称使用包名，版本信息使用 dumpsys package。".to_string());
             }
-            create_xapk(&pulled_files, &output_file, &package_info, aapt_info.as_ref())?;
+            create_xapk(
+                &pulled_files,
+                &output_file,
+                &package_info,
+                aapt_info.as_ref(),
+            )?;
         }
     }
 
     Ok(ExportResult {
         output_file: output_file.to_string_lossy().into_owned(),
         package_dir: package_dir.to_string_lossy().into_owned(),
-        pulled_files: pulled_files.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
+        pulled_files: pulled_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
         remote_paths,
         note,
     })
+}
+
+fn scan_device_apps(app_handle: &AppHandle, device: &Device) -> Result<(), String> {
+    let apps = list_installed_apps(device)?;
+    let total = apps.len();
+    emit_event(
+        app_handle,
+        "scan-started",
+        &ScanStarted {
+            device_serial: device.serial.clone(),
+            total,
+        },
+    );
+
+    let cache_root = icon_cache_root(&device.serial)?;
+    let mut icon_count = 0;
+    for (index, app) in apps.iter().enumerate() {
+        let presentation = inspect_app_presentation(device, app, &cache_root, app_handle);
+        if presentation.icon_data_url.is_some() {
+            icon_count += 1;
+        }
+
+        emit_event(
+            app_handle,
+            "scan-item",
+            &ScanItem {
+                index: index + 1,
+                total,
+                app: AppEntry {
+                    package_name: app.package_name.clone(),
+                    base_apk_path: app.base_apk_path.clone(),
+                    label: presentation.label,
+                    icon_data_url: presentation.icon_data_url,
+                },
+            },
+        );
+    }
+
+    let summary = ScanSummary { total, icon_count };
+    emit_event(app_handle, "scan-finished", &summary);
+    Ok(())
 }
 
 struct AppPresentation {
@@ -207,19 +239,34 @@ fn inspect_app_presentation(
     app_handle: &AppHandle,
 ) -> AppPresentation {
     if !app.base_apk_path.to_lowercase().ends_with(".apk") {
-        return AppPresentation { label: None, icon_data_url: None };
+        return AppPresentation {
+            label: None,
+            icon_data_url: None,
+        };
     }
 
     let package_cache = cache_root.join(safe_component(&app.package_name));
     let base_apk = package_cache.join("base.apk");
     if !base_apk.is_file() {
         if let Err(err) = fs::create_dir_all(&package_cache) {
-            emit_log(app_handle, format!("{} 图标缓存目录创建失败：{}", app.package_name, err));
-            return AppPresentation { label: None, icon_data_url: None };
+            emit_log(
+                app_handle,
+                format!("{} 图标缓存目录创建失败：{}", app.package_name, err),
+            );
+            return AppPresentation {
+                label: None,
+                icon_data_url: None,
+            };
         }
         if let Err(err) = pull_remote_file(device, &app.base_apk_path, &base_apk) {
-            emit_log(app_handle, format!("{} 图标读取失败：{}", app.package_name, err));
-            return AppPresentation { label: None, icon_data_url: None };
+            emit_log(
+                app_handle,
+                format!("{} 图标读取失败：{}", app.package_name, err),
+            );
+            return AppPresentation {
+                label: None,
+                icon_data_url: None,
+            };
         }
     }
 
@@ -231,44 +278,68 @@ fn inspect_app_presentation(
             icon_resource = info.icon_resource;
         }
         Ok(None) => {}
-        Err(err) => emit_log(app_handle, format!("{} aapt 读取失败，使用兜底图标规则：{}", app.package_name, err)),
+        Err(err) => emit_log(
+            app_handle,
+            format!(
+                "{} aapt 读取失败，使用兜底图标规则：{}",
+                app.package_name, err
+            ),
+        ),
     }
 
     if icon_resource.is_none() {
         icon_resource = find_launcher_icon_resource(&base_apk).unwrap_or_else(|err| {
-            emit_log(app_handle, format!("{} 图标解析失败：{}", app.package_name, err));
+            emit_log(
+                app_handle,
+                format!("{} 图标解析失败：{}", app.package_name, err),
+            );
             None
         });
     }
 
-    let icon_data_url = icon_resource
-        .as_deref()
-        .and_then(|resource| match extract_icon_data_url(&base_apk, resource) {
+    let icon_data_url = icon_resource.as_deref().and_then(|resource| {
+        match extract_icon_data_url(&base_apk, resource) {
             Ok(value) => value,
             Err(err) => {
-                emit_log(app_handle, format!("{} 图标提取失败：{}", app.package_name, err));
+                emit_log(
+                    app_handle,
+                    format!("{} 图标提取失败：{}", app.package_name, err),
+                );
                 None
             }
-        });
+        }
+    });
 
-    AppPresentation { label, icon_data_url }
+    AppPresentation {
+        label,
+        icon_data_url,
+    }
 }
 
-fn require_single_device() -> Result<Device, String> {
-    let output = run_command("adb", &["devices"])?;
-    let devices = parse_adb_devices(&output);
-    if devices.is_empty() {
-        return Err("未检测到已授权的 Android 设备。请连接设备，并确认 USB 调试授权。".to_string());
+fn selected_device(device_serial: String) -> Result<Device, String> {
+    let serial = device_serial.trim();
+    if serial.is_empty() {
+        return Err("请选择需要操作的 Android 设备。".to_string());
     }
-    if devices.len() > 1 {
-        let serials = devices.iter().map(|device| device.serial.as_str()).collect::<Vec<_>>().join(", ");
-        return Err(format!("检测到多个设备：{}。当前版本需要只连接一个设备。", serials));
-    }
-    Ok(devices[0].clone())
+    Ok(Device {
+        serial: serial.to_string(),
+    })
 }
 
 fn list_installed_apps(device: &Device) -> Result<Vec<InstalledApp>, String> {
-    let output = run_command("adb", &["-s", &device.serial, "shell", "pm", "list", "packages", "-3", "-f"])?;
+    let output = run_command(
+        "adb",
+        &[
+            "-s",
+            &device.serial,
+            "shell",
+            "pm",
+            "list",
+            "packages",
+            "-3",
+            "-f",
+        ],
+    )?;
     let mut apps = parse_package_file_list(&output);
     apps.retain(|app| is_user_installed_apk_path(&app.base_apk_path));
     if apps.is_empty() {
@@ -279,7 +350,10 @@ fn list_installed_apps(device: &Device) -> Result<Vec<InstalledApp>, String> {
 }
 
 fn get_apk_paths(device: &Device, package_name: &str) -> Result<Vec<String>, String> {
-    let output = run_command("adb", &["-s", &device.serial, "shell", "pm", "path", package_name])?;
+    let output = run_command(
+        "adb",
+        &["-s", &device.serial, "shell", "pm", "path", package_name],
+    )?;
     let paths = parse_pm_paths(&output);
     if paths.is_empty() {
         return Err(format!("未找到 {} 的 APK 路径。", package_name));
@@ -287,7 +361,11 @@ fn get_apk_paths(device: &Device, package_name: &str) -> Result<Vec<String>, Str
     Ok(paths)
 }
 
-fn pull_apks(device: &Device, remote_paths: &[String], output_dir: &Path) -> Result<Vec<PathBuf>, String> {
+fn pull_apks(
+    device: &Device,
+    remote_paths: &[String],
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
     let mut local_paths = Vec::new();
     let mut used_names = Vec::new();
     for remote_path in remote_paths {
@@ -316,7 +394,17 @@ fn pull_remote_file(device: &Device, remote_path: &str, local_path: &Path) -> Re
 }
 
 fn get_package_info(device: &Device, package_name: &str) -> Result<PackageInfo, String> {
-    let output = run_command("adb", &["-s", &device.serial, "shell", "dumpsys", "package", package_name])?;
+    let output = run_command(
+        "adb",
+        &[
+            "-s",
+            &device.serial,
+            "shell",
+            "dumpsys",
+            "package",
+            package_name,
+        ],
+    )?;
     Ok(parse_dumpsys_package_info(package_name, &output))
 }
 
@@ -339,7 +427,10 @@ fn create_xapk(
     package_info: &PackageInfo,
     aapt_info: Option<&AaptInfo>,
 ) -> Result<(), String> {
-    let apk_names = files.iter().map(|path| file_name_from_path(path)).collect::<Result<Vec<_>, _>>()?;
+    let apk_names = files
+        .iter()
+        .map(|path| file_name_from_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
     let base_apk = find_base_apk_name(&apk_names)?;
     let split_apks = apk_names
         .iter()
@@ -348,7 +439,11 @@ fn create_xapk(
         .collect::<Vec<_>>();
     let total_size = files
         .iter()
-        .map(|path| fs::metadata(path).map(|meta| meta.len()).map_err(|err| format!("读取文件大小失败：{}", err)))
+        .map(|path| {
+            fs::metadata(path)
+                .map(|meta| meta.len())
+                .map_err(|err| format!("读取文件大小失败：{}", err))
+        })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .sum::<u64>();
@@ -365,11 +460,16 @@ fn create_xapk(
         "apk_file": base_apk,
         "split_apks": split_apks,
     });
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|err| format!("生成 XAPK manifest 失败：{}", err))?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|err| format!("生成 XAPK manifest 失败：{}", err))?;
     write_zip(files, output_file, Some(("manifest.json", manifest_bytes)))
 }
 
-fn write_zip(files: &[PathBuf], output_file: &Path, extra_file: Option<(&str, Vec<u8>)>) -> Result<(), String> {
+fn write_zip(
+    files: &[PathBuf],
+    output_file: &Path,
+    extra_file: Option<(&str, Vec<u8>)>,
+) -> Result<(), String> {
     if let Some(parent) = output_file.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("创建输出目录失败：{}", err))?;
     }
@@ -378,23 +478,32 @@ fn write_zip(files: &[PathBuf], output_file: &Path, extra_file: Option<(&str, Ve
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     if let Some((name, data)) = extra_file {
-        zip.start_file(name, options).map_err(|err| format!("写入压缩包失败：{}", err))?;
-        zip.write_all(&data).map_err(|err| format!("写入压缩包失败：{}", err))?;
+        zip.start_file(name, options)
+            .map_err(|err| format!("写入压缩包失败：{}", err))?;
+        zip.write_all(&data)
+            .map_err(|err| format!("写入压缩包失败：{}", err))?;
     }
 
     for apk_path in files {
         let name = file_name_from_path(apk_path)?;
-        let mut apk_file = File::open(apk_path).map_err(|err| format!("打开 APK 文件失败：{}", err))?;
-        zip.start_file(name, options).map_err(|err| format!("写入压缩包失败：{}", err))?;
+        let mut apk_file =
+            File::open(apk_path).map_err(|err| format!("打开 APK 文件失败：{}", err))?;
+        zip.start_file(name, options)
+            .map_err(|err| format!("写入压缩包失败：{}", err))?;
         std::io::copy(&mut apk_file, &mut zip).map_err(|err| format!("写入压缩包失败：{}", err))?;
     }
 
-    zip.finish().map_err(|err| format!("完成压缩包失败：{}", err))?;
+    zip.finish()
+        .map_err(|err| format!("完成压缩包失败：{}", err))?;
     Ok(())
 }
 
 fn extract_icon_data_url(apk_path: &Path, resource_path: &str) -> Result<Option<String>, String> {
-    let mime = match Path::new(resource_path).extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_lowercase()) {
+    let mime = match Path::new(resource_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase())
+    {
         Some(ext) if ext == "png" => "image/png",
         Some(ext) if ext == "gif" => "image/gif",
         Some(ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
@@ -404,22 +513,32 @@ fn extract_icon_data_url(apk_path: &Path, resource_path: &str) -> Result<Option<
     };
 
     let file = File::open(apk_path).map_err(|err| format!("打开 APK 文件失败：{}", err))?;
-    let mut archive = ZipArchive::new(file).map_err(|err| format!("APK 文件不是有效 ZIP：{}", err))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|err| format!("APK 文件不是有效 ZIP：{}", err))?;
     let mut icon_file = match archive.by_name(resource_path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
     };
     let mut data = Vec::new();
-    icon_file.read_to_end(&mut data).map_err(|err| format!("读取图标资源失败：{}", err))?;
-    Ok(Some(format!("data:{};base64,{}", mime, STANDARD.encode(data))))
+    icon_file
+        .read_to_end(&mut data)
+        .map_err(|err| format!("读取图标资源失败：{}", err))?;
+    Ok(Some(format!(
+        "data:{};base64,{}",
+        mime,
+        STANDARD.encode(data)
+    )))
 }
 
 fn find_launcher_icon_resource(apk_path: &Path) -> Result<Option<String>, String> {
     let file = File::open(apk_path).map_err(|err| format!("打开 APK 文件失败：{}", err))?;
-    let mut archive = ZipArchive::new(file).map_err(|err| format!("APK 文件不是有效 ZIP：{}", err))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|err| format!("APK 文件不是有效 ZIP：{}", err))?;
     let mut candidates = Vec::new();
     for index in 0..archive.len() {
-        let file = archive.by_index(index).map_err(|err| format!("读取 APK 资源列表失败：{}", err))?;
+        let file = archive
+            .by_index(index)
+            .map_err(|err| format!("读取 APK 资源列表失败：{}", err))?;
         let name = file.name().to_string();
         if is_supported_image_resource(&name) && looks_like_launcher_icon(&name) {
             candidates.push(name);
@@ -474,7 +593,9 @@ fn parse_adb_devices(output: &str) -> Vec<Device> {
         .filter_map(|line| {
             let columns = line.split_whitespace().collect::<Vec<_>>();
             if columns.len() >= 2 && columns[1] == "device" {
-                Some(Device { serial: columns[0].to_string() })
+                Some(Device {
+                    serial: columns[0].to_string(),
+                })
             } else {
                 None
             }
@@ -508,7 +629,10 @@ fn parse_package_file_list(output: &str) -> Vec<InstalledApp> {
             if apk_path.is_empty() || package_name.is_empty() {
                 None
             } else {
-                Some(InstalledApp { package_name: package_name.to_string(), base_apk_path: apk_path.to_string() })
+                Some(InstalledApp {
+                    package_name: package_name.to_string(),
+                    base_apk_path: apk_path.to_string(),
+                })
             }
         })
         .collect()
@@ -517,7 +641,11 @@ fn parse_package_file_list(output: &str) -> Vec<InstalledApp> {
 fn parse_pm_paths(output: &str) -> Vec<String> {
     output
         .lines()
-        .filter_map(|line| line.trim().strip_prefix("package:").map(|path| path.to_string()))
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("package:")
+                .map(|path| path.to_string())
+        })
         .collect()
 }
 
@@ -558,15 +686,21 @@ fn parse_aapt_badging(output: &str) -> Result<AaptInfo, String> {
         return Err("aapt 输出缺少 package name。".to_string());
     }
 
-    let label = quoted_value(line_starting_with(output, "application-label:"), "application-label")
-        .or_else(|| quoted_value(line_starting_with(output, "application:"), "label"));
+    let label = quoted_value(
+        line_starting_with(output, "application-label:"),
+        "application-label",
+    )
+    .or_else(|| quoted_value(line_starting_with(output, "application:"), "label"));
 
     Ok(AaptInfo {
         label,
         version_code: quoted_value(package_line, "versionCode"),
         version_name: quoted_value(package_line, "versionName"),
         min_sdk_version: quoted_value(line_starting_with(output, "sdkVersion:"), "sdkVersion"),
-        target_sdk_version: quoted_value(line_starting_with(output, "targetSdkVersion:"), "targetSdkVersion"),
+        target_sdk_version: quoted_value(
+            line_starting_with(output, "targetSdkVersion:"),
+            "targetSdkVersion",
+        ),
         icon_resource: parse_aapt_icon_resource(output),
     })
 }
@@ -585,7 +719,10 @@ fn parse_aapt_icon_resource(output: &str) -> Option<String> {
     }
 
     candidates.sort_by_key(|(density, _)| *density);
-    candidates.pop().map(|(_, resource)| resource).or_else(|| quoted_value(line_starting_with(output, "application:"), "icon"))
+    candidates
+        .pop()
+        .map(|(_, resource)| resource)
+        .or_else(|| quoted_value(line_starting_with(output, "application:"), "icon"))
 }
 
 fn quoted_value(line: &str, key: &str) -> Option<String> {
@@ -602,7 +739,9 @@ fn quoted_value(line: &str, key: &str) -> Option<String> {
 }
 
 fn line_starting_with<'a>(text: &'a str, prefix: &str) -> &'a str {
-    text.lines().find(|line| line.starts_with(prefix)).unwrap_or("")
+    text.lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or("")
 }
 
 fn remote_file_name(remote_path: &str) -> Result<String, String> {
@@ -643,7 +782,9 @@ fn prefer_option(primary: Option<String>, secondary: Option<String>) -> Option<S
 }
 
 fn icon_cache_root(serial: &str) -> Result<PathBuf, String> {
-    let path = std::env::temp_dir().join("apk_extract_gui_icon_cache").join(safe_component(serial));
+    let path = std::env::temp_dir()
+        .join("apk_extract_gui_icon_cache")
+        .join(safe_component(serial));
     fs::create_dir_all(&path).map_err(|err| format!("创建图标缓存目录失败：{}", err))?;
     Ok(path)
 }
@@ -651,7 +792,13 @@ fn icon_cache_root(serial: &str) -> Result<PathBuf, String> {
 fn safe_component(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -716,7 +863,12 @@ fn emit_event<T: Serialize + Clone>(app_handle: &AppHandle, event: &str, payload
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![scan_apps, preview_paths, export_package])
+        .invoke_handler(tauri::generate_handler![
+            list_devices,
+            start_scan,
+            preview_paths,
+            export_package
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

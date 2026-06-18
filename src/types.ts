@@ -1,6 +1,10 @@
 export type BundleFormat = "apks" | "xapk";
 export type Theme = "light" | "dark";
 
+export interface Device {
+  serial: string;
+}
+
 export interface AppEntry {
   packageName: string;
   baseApkPath: string;

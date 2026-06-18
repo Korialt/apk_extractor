@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
-import type { AppEntry, BundleFormat, ExportResult, ScanItem, ScanStarted, ScanSummary, Theme } from "./types";
+import type { AppEntry, BundleFormat, Device, ExportResult, ScanItem, ScanStarted, ScanSummary, Theme } from "./types";
 
 function appName(app: AppEntry): string {
   return app.label?.trim() || app.packageName;
@@ -47,9 +47,19 @@ function AppIcon({ app }: { app: AppEntry }) {
   return <div className="app-icon placeholder" />;
 }
 
-function AppRow({ app, active, onSelect }: { app: AppEntry; active: boolean; onSelect: (app: AppEntry) => void }) {
+function AppRow({
+  app,
+  active,
+  disabled,
+  onSelect,
+}: {
+  app: AppEntry;
+  active: boolean;
+  disabled: boolean;
+  onSelect: (app: AppEntry) => void;
+}) {
   return (
-    <button type="button" className={`app-row${active ? " active" : ""}`} onClick={() => onSelect(app)}>
+    <button type="button" className={active ? "app-row active" : "app-row"} disabled={disabled} onClick={() => onSelect(app)}>
       <AppIcon app={app} />
       <div className="app-main">
         <strong>{appName(app)}</strong>
@@ -87,7 +97,10 @@ export default function App() {
   const [outputDir, setOutputDir] = useState("exports");
   const [format, setFormat] = useState<BundleFormat>("apks");
   const [busy, setBusy] = useState(false);
+  const [scanRunning, setScanRunning] = useState(false);
   const [phase, setPhase] = useState("就绪");
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [devicePickerOpen, setDevicePickerOpen] = useState(false);
   const [deviceSerial, setDeviceSerial] = useState<string | null>(null);
   const [scanTotal, setScanTotal] = useState(0);
   const [scanIndex, setScanIndex] = useState(0);
@@ -99,6 +112,7 @@ export default function App() {
   const selectedApp = selectedPackage ? apps.find((app) => app.packageName === selectedPackage) ?? null : null;
   const filteredApps = useMemo(() => apps.filter((app) => matchesQuery(app, query)), [apps, query]);
   const scanPercent = scanTotal > 0 ? Math.round((scanIndex / scanTotal) * 100) : null;
+  const actionBusy = busy || scanRunning;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -111,6 +125,8 @@ export default function App() {
         setScanTotal(event.payload.total);
         setScanIndex(0);
         setIconCount(0);
+        setScanRunning(true);
+        setPhase(`正在扫描 ${event.payload.deviceSerial} 设备`);
         appendLog(`设备：${event.payload.deviceSerial}`);
         appendLog(`第三方应用数量：${event.payload.total}`);
       }),
@@ -124,9 +140,17 @@ export default function App() {
         setScanIndex(event.payload.index);
       }),
       listen<string>("scan-log", (event) => appendLog(event.payload)),
+      listen<string>("scan-error", (event) => {
+        setScanRunning(false);
+        appendLog(event.payload);
+        setPhase("扫描失败，详情见日志");
+      }),
       listen<ScanSummary>("scan-finished", (event) => {
         setIconCount(event.payload.iconCount);
+        setScanIndex(event.payload.total);
+        setScanRunning(false);
         appendLog(`扫描完成：${event.payload.total} 个应用，读取到 ${event.payload.iconCount} 个图标。`);
+        setPhase(`扫描完成：${event.payload.total} 个应用`);
       }),
     ];
 
@@ -140,8 +164,52 @@ export default function App() {
   }
 
   async function scanApps() {
+    if (scanRunning) return;
+
     setBusy(true);
-    setPhase("扫描应用");
+    setPhase("检测设备");
+    setDevicePickerOpen(false);
+    appendLog("检测已授权 Android 设备...");
+    try {
+      const foundDevices = await invoke<Device[]>("list_devices");
+      setDevices(foundDevices);
+
+      if (foundDevices.length === 0) {
+        setPhase("未检测到设备");
+        appendLog("未检测到设备。");
+        return;
+      }
+
+      if (foundDevices.length > 1) {
+        setPhase(`检测到 ${foundDevices.length} 台设备，请选择扫描设备`);
+        appendLog(`检测到 ${foundDevices.length} 台设备，请选择其中一台。`);
+        setDevicePickerOpen(true);
+        return;
+      }
+
+      await startScan(foundDevices[0].serial);
+    } catch (error) {
+      const message = safeLogMessage(error);
+      appendLog(message);
+      setPhase("设备检测失败，详情见日志");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startScan(serial: string) {
+    const normalizedSerial = serial.trim();
+    if (!normalizedSerial) {
+      appendLog("请选择需要扫描的设备。");
+      setPhase("请选择设备");
+      return;
+    }
+
+    setBusy(true);
+    setScanRunning(true);
+    setDevicePickerOpen(false);
+    setDeviceSerial(normalizedSerial);
+    setPhase(`正在扫描 ${normalizedSerial} 设备`);
     setApps([]);
     setSelectedPackage(null);
     setPreviewPaths([]);
@@ -150,15 +218,14 @@ export default function App() {
     setScanTotal(0);
     setScanIndex(0);
     setIconCount(0);
-    appendLog("开始扫描第三方应用...");
+    appendLog(`正在扫描 ${normalizedSerial} 设备`);
     try {
-      const summary = await invoke<ScanSummary>("scan_apps");
-      setIconCount(summary.iconCount);
-      setPhase(`扫描完成：${summary.total} 个应用`);
+      await invoke<void>("start_scan", { deviceSerial: normalizedSerial });
     } catch (error) {
       const message = safeLogMessage(error);
       appendLog(message);
-      setPhase("扫描失败，详情见日志");
+      setScanRunning(false);
+      setPhase("扫描启动失败，详情见日志");
     } finally {
       setBusy(false);
     }
@@ -172,6 +239,12 @@ export default function App() {
   }
 
   async function selectApp(app: AppEntry) {
+    if (!deviceSerial) {
+      appendLog("请先扫描并选择设备。");
+      setPhase("请先扫描设备");
+      return;
+    }
+
     setSelectedPackage(app.packageName);
     setPreviewPaths([]);
     setExportResult(null);
@@ -179,7 +252,7 @@ export default function App() {
     setPhase("查询 APK 路径");
     appendLog(`查询 ${app.packageName} 的 APK 路径...`);
     try {
-      const paths = await invoke<string[]>("preview_paths", { packageName: app.packageName });
+      const paths = await invoke<string[]>("preview_paths", { deviceSerial, packageName: app.packageName });
       setPreviewPaths(paths);
       appendLog(`找到 ${paths.length} 个 APK 路径。`);
       setPhase("路径查询完成");
@@ -198,6 +271,11 @@ export default function App() {
       setPhase("请先选择应用");
       return;
     }
+    if (!deviceSerial) {
+      appendLog("请先扫描并选择设备。");
+      setPhase("请先扫描设备");
+      return;
+    }
 
     setBusy(true);
     setPhase("提取并打包");
@@ -205,6 +283,7 @@ export default function App() {
     appendLog(`开始提取 ${selectedApp.packageName}，目标格式：${format.toUpperCase()}。`);
     try {
       const result = await invoke<ExportResult>("export_package", {
+        deviceSerial,
         packageName: selectedApp.packageName,
         outputDir,
         bundleFormat: format,
@@ -240,12 +319,12 @@ export default function App() {
 
         <section className="panel">
           <div className="panel-title">设备扫描</div>
-          <button type="button" className="primary" disabled={busy} onClick={() => void scanApps()}>
+          <button type="button" className="primary" disabled={actionBusy} onClick={() => void scanApps()}>
             扫描第三方应用
           </button>
           <p className="status">{phase}</p>
           <div className="progress-block">
-            <div className="progress-bar" data-indeterminate={busy && scanPercent == null ? "true" : "false"}>
+            <div className="progress-bar" data-indeterminate={actionBusy && scanPercent == null ? "true" : "false"}>
               <div className="progress-fill" style={{ width: scanPercent == null ? "42%" : `${scanPercent}%` }} />
             </div>
             <div className="progress-meta">
@@ -272,17 +351,17 @@ export default function App() {
 
         <section className="panel">
           <div className="panel-title">打包设置</div>
-          <FormatSwitch value={format} onChange={setFormat} disabled={busy} />
+          <FormatSwitch value={format} onChange={setFormat} disabled={actionBusy} />
           <label className="field-block">
             输出目录
             <div className="inline-field">
-              <input value={outputDir} onChange={(event) => setOutputDir(event.target.value)} />
-              <button type="button" disabled={busy} onClick={() => void chooseOutputDir()}>
+              <input value={outputDir} disabled={actionBusy} onChange={(event) => setOutputDir(event.target.value)} />
+              <button type="button" disabled={actionBusy} onClick={() => void chooseOutputDir()}>
                 选择
               </button>
             </div>
           </label>
-          <button type="button" className="primary" disabled={busy} onClick={() => void exportSelected()}>
+          <button type="button" className="primary" disabled={actionBusy} onClick={() => void exportSelected()}>
             提取并打包
           </button>
         </section>
@@ -306,7 +385,7 @@ export default function App() {
             ) : (
               <div className="app-list">
                 {filteredApps.map((app) => (
-                  <AppRow key={app.packageName} app={app} active={app.packageName === selectedPackage} onSelect={(value) => void selectApp(value)} />
+                  <AppRow key={app.packageName} app={app} active={app.packageName === selectedPackage} disabled={actionBusy} onSelect={(value) => void selectApp(value)} />
                 ))}
               </div>
             )}
@@ -346,6 +425,29 @@ export default function App() {
           </aside>
         </div>
       </section>
+
+      {devicePickerOpen ? (
+        <div className="modal-backdrop">
+          <section className="device-modal" role="dialog" aria-modal="true" aria-labelledby="device-picker-title">
+            <div>
+              <h3 id="device-picker-title">选择设备</h3>
+              <p>检测到 {devices.length} 台已授权设备</p>
+            </div>
+            <div className="device-list">
+              {devices.map((device) => (
+                <button type="button" className="device-option" key={device.serial} disabled={actionBusy} onClick={() => void startScan(device.serial)}>
+                  <span className="device-serial">{device.serial}</span>
+                </button>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button type="button" disabled={actionBusy} onClick={() => setDevicePickerOpen(false)}>
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

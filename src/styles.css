@@ -459,6 +459,71 @@ code {
   white-space: nowrap;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: rgb(15 23 28 / 0.42);
+  padding: 24px;
+}
+
+.device-modal {
+  display: grid;
+  gap: 16px;
+  width: min(430px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 0.28);
+  padding: 18px;
+}
+
+.device-modal h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.device-modal p {
+  margin: 5px 0 0;
+  color: var(--muted);
+}
+
+.device-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.device-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: var(--surface-alt);
+  text-align: left;
+}
+
+.device-option:hover:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.device-serial {
+  overflow: hidden;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 @keyframes progress-pulse {
   0% {
     margin-left: -42%;

@@ -112,7 +112,7 @@ export default function App() {
         setScanIndex(0);
         setIconCount(0);
         appendLog(`设备：${event.payload.deviceSerial}`);
-        appendLog(`已安装包数量：${event.payload.total}`);
+        appendLog(`第三方应用数量：${event.payload.total}`);
       }),
       listen<ScanItem>("scan-item", (event) => {
         setApps((current) => {
@@ -150,7 +150,7 @@ export default function App() {
     setScanTotal(0);
     setScanIndex(0);
     setIconCount(0);
-    appendLog("开始扫描已安装应用...");
+    appendLog("开始扫描第三方应用...");
     try {
       const summary = await invoke<ScanSummary>("scan_apps");
       setIconCount(summary.iconCount);
@@ -231,7 +231,7 @@ export default function App() {
         <div className="brand">
           <div>
             <h1>APK Split Extractor</h1>
-            <p>扫描设备应用，提取 split APK 并打包</p>
+            <p>扫描第三方应用，提取 split APK 并打包</p>
           </div>
           <button type="button" className="theme-toggle" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
             {theme === "light" ? "深色" : "浅色"}
@@ -241,7 +241,7 @@ export default function App() {
         <section className="panel">
           <div className="panel-title">设备扫描</div>
           <button type="button" className="primary" disabled={busy} onClick={() => void scanApps()}>
-            扫描全部应用
+            扫描第三方应用
           </button>
           <p className="status">{phase}</p>
           <div className="progress-block">
@@ -302,7 +302,7 @@ export default function App() {
         <div className="workspace">
           <section className="app-list-panel">
             {filteredApps.length === 0 ? (
-              <div className="empty">{apps.length === 0 ? "点击“扫描全部应用”开始。" : "没有匹配当前关键词的应用。"}</div>
+              <div className="empty">{apps.length === 0 ? "点击“扫描第三方应用”开始。" : "没有匹配当前关键词的应用。"}</div>
             ) : (
               <div className="app-list">
                 {filteredApps.map((app) => (

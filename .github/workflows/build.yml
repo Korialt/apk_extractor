@@ -52,41 +52,40 @@ jobs:
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      - name: Build Tauri app
+      - name: Build portable app
         run: npm run build
 
-      - name: Collect Windows artifacts
+      - name: Package Windows portable artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifact
-          Get-ChildItem src-tauri\target\release\bundle -Recurse -File |
-            Where-Object { $_.Extension -in '.exe', '.msi' } |
-            Copy-Item -Destination artifact
-          Compress-Archive -Path artifact\* -DestinationPath apk-extract-gui-windows-x86_64.zip
+          Copy-Item src-tauri\target\release\apk-extract-gui.exe artifact\
+          Copy-Item README.md artifact\
+          Compress-Archive -Path artifact\* -DestinationPath apk-extract-gui-windows-portable-x86_64.zip
 
-      - name: Collect Linux artifacts
+      - name: Package Linux portable artifact
         if: runner.os == 'Linux'
         run: |
           mkdir -p artifact
-          find src-tauri/target/release/bundle -type f \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
-            -exec cp {} artifact/ \;
-          tar -czf apk-extract-gui-linux-x86_64.tar.gz -C artifact .
+          cp src-tauri/target/release/apk-extract-gui artifact/
+          cp README.md artifact/
+          chmod +x artifact/apk-extract-gui
+          tar -czf apk-extract-gui-linux-portable-x86_64.tar.gz -C artifact .
 
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: apk-extract-gui-windows-x86_64
-          path: apk-extract-gui-windows-x86_64.zip
+          name: apk-extract-gui-windows-portable-x86_64
+          path: apk-extract-gui-windows-portable-x86_64.zip
 
       - name: Upload Linux artifact
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: apk-extract-gui-linux-x86_64
-          path: apk-extract-gui-linux-x86_64.tar.gz
+          name: apk-extract-gui-linux-portable-x86_64
+          path: apk-extract-gui-linux-portable-x86_64.tar.gz
 
   release:
     name: release

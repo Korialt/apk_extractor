@@ -268,10 +268,11 @@ fn require_single_device() -> Result<Device, String> {
 }
 
 fn list_installed_apps(device: &Device) -> Result<Vec<InstalledApp>, String> {
-    let output = run_command("adb", &["-s", &device.serial, "shell", "pm", "list", "packages", "-f"])?;
+    let output = run_command("adb", &["-s", &device.serial, "shell", "pm", "list", "packages", "-3", "-f"])?;
     let mut apps = parse_package_file_list(&output);
+    apps.retain(|app| is_user_installed_apk_path(&app.base_apk_path));
     if apps.is_empty() {
-        return Err("设备没有返回已安装应用列表。".to_string());
+        return Err("设备没有返回第三方已安装应用列表。".to_string());
     }
     apps.sort_by(|left, right| left.package_name.cmp(&right.package_name));
     Ok(apps)
@@ -479,6 +480,22 @@ fn parse_adb_devices(output: &str) -> Vec<Device> {
             }
         })
         .collect()
+}
+
+fn is_user_installed_apk_path(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase();
+    if normalized.starts_with("/system/")
+        || normalized.starts_with("/system_ext/")
+        || normalized.starts_with("/product/")
+        || normalized.starts_with("/vendor/")
+        || normalized.starts_with("/odm/")
+        || normalized.starts_with("/oem/")
+        || normalized.starts_with("/apex/")
+    {
+        return false;
+    }
+
+    normalized.starts_with("/data/app/") || normalized.starts_with("/mnt/expand/")
 }
 
 fn parse_package_file_list(output: &str) -> Vec<InstalledApp> {

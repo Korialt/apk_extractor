@@ -1,12 +1,12 @@
 # APK Split Extractor
 
-跨平台桌面工具，用于从已连接并授权的 Android 设备中扫描全部已安装应用，展示应用图标、应用名、包名和 base APK 路径，选择目标应用后提取全部 split APK，并打包为 `.apks` 或 `.xapk`。
+跨平台桌面工具，用于从已连接并授权的 Android 设备中扫描第三方用户安装应用，展示应用图标、应用名、包名和 base APK 路径，选择目标应用后提取全部 split APK，并打包为 `.apks` 或 `.xapk`。
 
-界面使用 Tauri 2 + React + TypeScript + Rust，视觉结构参考同目录的 `media_administrator` 项目。
+界面使用 Tauri 2 + React + TypeScript + Rust。
 
 ## 功能
 
-- 一键扫描连接设备里的全部已安装包。
+- 一键扫描连接设备里的第三方用户安装包，排除系统、预装和系统分区应用。
 - 列表展示应用图标、应用名、包名和 base APK 路径。
 - 支持输入关键词过滤应用名、包名或 APK 路径。
 - 选择目标应用后，通过 `pm path <package>` 查询所有 APK 路径。
@@ -16,6 +16,10 @@
 - 如果本机安装了 `aapt`，会进一步从 `base.apk` 检测应用名称、版本信息和图标资源。
 - 扫描、失败和完成信息只显示在界面日志中，不弹出错误或完成窗口。
 - 支持 Windows 和 Linux。
+
+## 应用图标
+
+应用自身图标是本项目生成的自有图标资产，不复用其他项目图标。
 
 ## 图标识别说明
 
@@ -53,7 +57,7 @@ npm run dev
 
 1. 连接并授权 Android 设备。
 2. 启动工具。
-3. 点击“扫描全部应用”。
+3. 点击“扫描第三方应用”。
 4. 如需缩小范围，在过滤框中输入应用名、包名或 APK 路径片段。
 5. 在应用列表中选择目标应用。
 6. 用 APKS/XAPK 滑动式按钮选择输出格式。
@@ -73,8 +77,8 @@ npm run dev
 仓库内置 `.github/workflows/build.yml`：
 
 - 每次 push 和 pull request 会运行 TypeScript 检查、Rust 检查和 Tauri 构建。
-- Windows 会生成 Tauri 安装包并打包为 `apk-extract-gui-windows-x86_64.zip`。
-- Linux 会生成 `.deb` 和 `.rpm`，并打包为 `apk-extract-gui-linux-x86_64.tar.gz`。
+- Windows 会生成绿色版 `apk-extract-gui.exe`，并打包为 `apk-extract-gui-windows-portable-x86_64.zip`。
+- Linux 会生成绿色版 `apk-extract-gui`，并打包为 `apk-extract-gui-linux-portable-x86_64.tar.gz`。
 - 推送 `v*` 标签时会自动创建或更新 GitHub Release，并上传构建产物。
 
 发布示例：
@@ -91,10 +95,11 @@ npm install
 npm run build
 ```
 
-Linux 本地构建会生成 `.deb` 和 `.rpm`。Windows 构建会生成 NSIS/MSI 安装包。
+本地构建会生成绿色版可执行文件，不生成安装包。
 
 构建结果在：
 
 ```text
-src-tauri/target/release/bundle/
+src-tauri/target/release/apk-extract-gui
+src-tauri/target/release/apk-extract-gui.exe
 ```

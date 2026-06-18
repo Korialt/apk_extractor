@@ -1,0 +1,14 @@
+[project]
+name = "apk-extract-gui"
+version = "0.1.0"
+description = "从连接的 Android 设备提取 split APK 并打包为 APKS 或 XAPK 的图形工具"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+apk-extract-gui = "apk_extract_gui.__main__:main"
+
+[tool.pyinstaller]
+name = "apk-extract-gui"
+
